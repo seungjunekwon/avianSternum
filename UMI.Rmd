@@ -1,0 +1,146 @@
+---
+title: 'pic91'
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    toc: yes
+  pdf_document:
+    keep_tex: yes
+    latex_engine: lualatex
+---
+
+### Setup
+
+```{r libraries,message=FALSE}
+rm(list = ls(all.names = TRUE)) # delete all objects
+
+if (! requireNamespace("BiocManager", quietly=TRUE))
+    install.packages("BiocManager")
+    
+libs <- c("ggplot2", "dplyr", "tidyr", "purrr", "ggrepel", "ggsci", "readr", "tibble", "pheatmap", "viridis", "uwot", "DESeq2", "msigdbr", "tsne", "umap", "heatmap3")
+cranlibs <- c("magick", "RColorBrewer")
+
+for (i in c(libs, cranlibs)) {
+  if (! require(i, quietly=TRUE, character.only=TRUE)) {
+    if (i %in% cranlibs) install.packages(i, quietly=TRUE, character.only=TRUE)
+    else                 BiocManager::install(i)
+    suppressWarnings(library(i, quietly=TRUE, character.only=TRUE))
+  }
+}
+
+# geometric normalization between samples (columns)
+gscale <- function(X){
+  if(any(X<0)) stop("All values should be non-negative.")
+  scale(X,
+      scale = apply(X/apply(X, 1, function(x)
+      exp(mean(log(x)))), 2, function(x)
+        median(x,na.rm=TRUE)
+      ),
+    center=FALSE
+  )
+}
+
+# Helper functions
+ggpoints <- function(x,...) 
+  ggplot(x,...) + geom_point(size=3,stroke=1) +
+  ggrepel::geom_text_repel(size=4) + theme_minimal() + mycolor
+## no label and readnumber visualizaton
+#  ggplot(x,...) + geom_point() +theme_minimal() + mycolor
+print(sessionInfo(),locale=FALSE)
+
+select <- dplyr::select
+```
+
+
+### Parameters
+
+*modify here*
+```{r params}
+# Files
+projName <- "pic91"
+outDir <- "/Users/zou/tmp/pic_240725/pic91_dr_atsuta/report_2.0_un/"
+e2g <- read_csv("/Users/zou/OkiLab Dropbox/OkiLab_Library/biomart_e2g/emu_ZJU2.0_xref.csv", na="NA") %>%  as_tibble
+
+contrast <- list( 
+  hh24_vs_hh36d = c("group","HH24","HH36_d"),
+  hh24_vs_hh36v = c("group","HH24","HH36_v"),
+  hh36d_vs_hh36v = c("group","HH36_v","HH36_d")
+)
+
+# heatmap/l2fc.csv/padj.csv 用
+fdr <- 0.1 # acceptable false discovery rate
+```
+
+*generally do not require modification*
+```{r}
+lfcthreth <- log2(1) # threshold in abs(log2FC)
+deftable <- paste(outDir, "deftable_", projName, ".tsv", sep="")
+## Data selection (filter rows of deftable)
+use <- quo(grepl("[^.]",group))
+
+# Graphics
+# aesthetic mapping of labels
+#myaes <- aes(colour=iris,shape=UV,label=replicate) 
+myaes <- aes(colour=iris,label=replicate) 
+# color palette of points: See vignette("ggsci")
+mycolor <- ggsci::scale_color_d3("category20") # color palette of points
+# PCA/UMAP
+scalerows <- TRUE # gene-wise scaling (pattern is the matter?)
+ntop <- 500 # number of top-n genes with high variance
+seed <- 123 # set another number if UMAP looks not good
+n_nei <- 5 # number of neighboring data points in UMAP
+# DESeq2
+#model <- ~leg + enzyme + leg:enzyme
+model <- ~group
+#delete old output files
+file2rm <- c("l2fc_", "padj_", "stats_", "UMI_count_", "normalizedCountTable_", "PCA_RegLog_", "UMAP_", "heatMap_")
+for (i in file2rm) {
+  csv2rm <- paste(outDir, i, projName, ".csv", sep="")
+  if (file.exists(csv2rm)) file.remove(csv2rm, showWarnings=F)
+  if (i == "heatMap_") {
+    png2rm <- paste(outDir, i, projName, ".png", sep="")
+    if (file.exists(png2rm)) file.remove(png2rm, showWarnings=F)
+  }
+}
+```
+
+
+### Retrieve Biomart
+
+```{r biomart, cache=TRUE}
+colnames(e2g) <- c("ens_gene", "ext_gene", "biotype", "chr")
+annotate <- partial(right_join,e2g,by="ens_gene")
+```
+
+### Load counts
+
+```{r loadUMI}
+def <- readr::read_tsv(deftable, progress=F, show_col_types=F) %>% filter(!!use)
+
+# Set reference levels according to the contrast
+for(x in keep(contrast,is.character))
+  def[[x[1]]] <- relevel(factor(def[[x[1]]]),x[3])
+umi <- def$file %>% unique %>% tibble(file=.) %>% 
+  mutate(data=map(file,readr::read_tsv, progress=FALSE, show_col_types=F)) %>%
+  unnest()
+colnames(umi)[3] <- "barcode"
+umi <- umi %>%
+  inner_join(select(def,file,barcode,sample),.,c("file","barcode")) %>%
+  select(-file,-barcode)
+colnames(umi)[2] <- "ens_gene"
+mat <- transform(ens_gene=umi$ens_gene, ext_gene=umi$ens_gene, biotype=umi$ens_gene, chr=umi$ens_gene, sample=umi$sample, umi) %>% spread(sample,count,fill=0)   # mat object is UMI count data
+matx <- merge(mat, e2g, by="ens_gene",all = T) %>% subset(!is.na(ext_gene.x))
+mat[,1] <- matx[,1]
+mat[,seq(2,4)] <- matx[,seq(dim(matx)[2]-2, dim(matx)[2])]
+mat[,seq(5, dim(mat)[2])] <- matx[,seq(5, dim(matx)[2]-3)]
+# mat$ext_gene <- matx$ext_gene.y
+# mat$biotype <- matx$biotype.y
+# mat$chr <- matx$chr.y
+#for total RNA 
+#a <- readr::read_tsv("/home/guestA/n70275a/kTanaka/0434HiSeq/countFiles/UV-CELseq2R0434.renamedfeatureCounts.txt")
+#mat <- a %>% dplyr::select(-(2:6)) %>% rename(ens_gene=Geneid) %>% inner_join(e2g,.)%>% mutate(chr=factor(chr,c(1:maxchrom,"X","Y","MT"))) %>%
+#filter(!is.na(chr))
+print(def)
+```
